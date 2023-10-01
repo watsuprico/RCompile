@@ -1,0 +1,366 @@
+--[[
+	
+	RIT RandomGenerator API
+		@since 1.0
+		@brief Generate a random number in a variety of different ways.
+
+]]
+
+local args = {...}
+local Internal = args[1]
+
+if (Internal == nil or type(Internal) ~= "table") then
+    error("Missing Internal object!")
+end
+-- Is OpenComputer?
+local oc = Internal.Platform == "oc" and true or false
+
+local Crypto = System.GetAPI("Crypto");
+
+
+local function isPrime(n)
+	if type(n)~="number" then return false end
+    for i = 2, n^(1/2) do
+        if (n % i) == 0 then
+            return false
+        end
+    end
+    return true
+end
+local function getEpoch()
+	if (oc) then
+		return os.time();
+	else
+		return os.epoch("utc");
+	end
+end
+
+
+
+
+
+
+local RandomGenerator = {
+	IsPrime = function(n)
+		return isPrime(n)
+	end,
+	GetEpoch = getEpoch,
+}
+
+
+-- Secure random, pulled from the ECC API
+RandomGenerator.SecureRandom = (function()
+	local function mapToStr(t)
+	    if type(t) == "table" then
+	        return string.char(unpack(t));
+	    else
+	        return tostring(t);
+	    end
+	end
+
+	local entropy = "";
+	local accumulator = "";
+	local entropyPath = "/Temp/.random";
+
+	local function feed(data)
+	    accumulator = accumulator .. (data or "");
+	end
+
+	local function digest()
+	    entropy = tostring(Crypto.Sha256(entropy .. accumulator));
+	    accumulator = "";
+	end
+
+	-- if Internal.FileSystem.exists(entropyPath) then
+	--     local entropyFile = Internal.FileSystem.open(entropyPath, "rb");
+	--     feed(entropyFile.readAll());
+	--     entropyFile.close();
+	-- end
+
+	-- Add context.
+	feed("init");
+	feed(tostring(math.random(1, 2^31 - 1)));
+	feed("|");
+	feed(tostring(math.random(1, 2^31 - 1)));
+	feed("|");
+	feed(tostring(math.random(1, 2^4)));
+	feed("|");
+	feed(getEpoch());
+	feed("|");
+	feed(tostring({}));
+	feed(tostring({}));
+	digest();
+	feed(tostring(getEpoch()));
+	digest();
+
+	-- Add entropy by counting.
+	local countTable = {};
+	local inner = "";
+	local countf = "";
+	if (oc) then
+	    inner = "function()return{" .. ("e'',"):rep(256) .. "}end";
+	    countf = assert(load("local e=os.time return " .. inner))();
+	else
+	    inner = "function()return{" .. ("e'utc',"):rep(256) .. "}end";
+	    countf = assert(load("local e=os.epoch return " .. inner))();
+	end
+
+	for i = 1, 300 do
+	    while true do
+	        local t = countf();
+	        local t1 = t[1];
+	        if t1 ~= t[256] then
+	            for j = 1, 256 do
+	                if t1 ~= t[j] then
+	                    countTable[i] = j - 1;
+	                    break
+	                end
+	            end
+	            break;
+	        end
+	    end
+	end
+
+	feed(mapToStr(countTable));
+	digest();
+
+	local function save()
+	    feed("save");
+	    feed(tostring(getEpoch()));
+	    feed(tostring({}));
+	    digest();
+
+	    local entropyFile = fs.open(entropyPath, "wb");
+	    entropyFile.write(tostring(Crypto.HMAC("save", entropy)));
+	    entropy = tostring(Crypto.Sha256(entropy));
+	    entropyFile.close();
+	end
+	-- save()
+
+	local function seed(data)
+	    feed("seed");
+	    feed(tostring(getEpoch()));
+	    feed(tostring({}));
+	    feed(mapToStr(data));
+	    digest();
+	    -- save();
+	end
+
+	local function random()
+	    feed("random");
+	    feed(tostring(getEpoch()));
+	    feed(tostring({}));
+	    digest();
+	    -- save();
+
+	    local result = Crypto.HMAC("out", entropy);
+	    entropy = tostring(Crypto.Sha256(entropy));
+
+	    return result;
+	end
+
+	return {
+        Seed = seed,
+        -- Save = save,
+        Random = random,
+        RandomNumber = function(minValue, maxValue)
+        	local num = math.abs(tonumber(random():toHex(), 16));
+
+        	if maxValue ~= nil or minValue ~= nil then
+				if type(maxValue) == "number" and type(minValue) == "number" then
+					min = math.min(minValue,maxValue);
+					max = min == minValue and maxValue or minValue;
+					local range = max - min;
+
+					local decimalNumber = num;
+					while decimalNumber>1 do
+						decimalNumber = decimalNumber / 10;
+					end
+					
+					return math.floor(min + (decimalNumber * (range+1)));
+				end
+			end
+			return num;
+        end
+    };
+end)()
+
+
+
+
+
+RandomGenerator.Lua = {};
+local Lua = {};
+Lua.__index = Lua;
+
+function Lua:Randomize() -- "Randomize" the seed
+	math.randomseed(RandomGenerator.SecureRandom.RandomNumber());
+	math.randomseed(getEpoch() + math.random(100,99999999999));
+end
+function Lua:Random(min, max)
+	if (type(min) == "number" and type(max) == "number") and (min ~= nil and max ~= nil) then
+		return math.random(min,max);
+	else
+		return math.random();
+	end
+end
+RandomGenerator.Lua = function() -- Return a new Lua math.random generator object
+	local self = {};
+	setmetatable(self, Lua);
+	return self;
+end
+
+
+
+local LinearCongruential = {};
+LinearCongruential.__index = LinearCongruential;
+
+function LinearCongruential:Randomize()
+	math.randomseed(RandomGenerator.SecureRandom.RandomNumber());
+	self.Modulus = RandomGenerator.GeneratePrime(1000000,99999999999, RandomGenerator.SecureRandom);
+	self.Multiplier = math.random(100, 1000);
+	self.Increment = math.random(100, 1000);
+	self.Seed = getEpoch() + math.random(100,99999999999);
+	math.randomseed(RandomGenerator.SecureRandom.RandomNumber());
+end
+
+function LinearCongruential:Random(self, min, max) -- Quite random, may dup  (almost double the dups), slow
+	max = max or 10;
+	min = min or 0;
+	if min>max then
+		local a=max;
+		max = min;
+		min = a;
+	end
+
+	-- generate
+	self.Seed = (((self.Seed * self.Multiplier)+self.Increment) % self.Modulus);
+
+	-- Okay, now bring it down to size requirements and ship out
+	if max ~= nil or min ~= nil then
+		if type(max) == "number" and type(min) == "number" then
+			local DecNumber = self.Seed;
+			while DecNumber>1 do
+				DecNumber = DecNumber / 10;
+			end
+			return math.floor(DecNumber * ((max-min)+1) + min) -- Should work ???
+		end
+	end
+	return self.Seed
+end
+RandomGenerator.LinearCongruential = function() -- Return a new LinearCongruential object
+	local self = {};
+	setmetatable(self, LinearCongruential);
+	self:Randomize();
+	return self;
+end
+
+
+
+-- "Static" methods
+-- Wrote this a while ago, ... like years, I believe this is an .. rough .. way of randomly generating a number -> checking if it is prime -> returning if so
+RandomGenerator.GeneratePrime = function(lowerLimit, upperLimit, randomizer) -- brute force a random prime number
+	lowerLimit = lowerLimit or 100^7;
+	upperLimit = upperLimit or 100^8;
+
+	if lowerLimit == nil or upperLimit == nil then return end
+	if lowerLimit < 3 or upperLimit < 5 or lowerLimit>upperLimit or upperLimit> 100^19 then -- 100^20 is eql to "Infinity"
+		error("Lower/upper limit out of range.");
+	end
+	
+	local seed = seed or RandomGenerator.SecureRandom.RandomNumber();
+	-- randomizer = randomizer or RandomGenerator.Lua
+	local randomizeSeed = function() math.randomseed(RandomGenerator.SecureRandom.RandomNumber()) end;
+	local func = function() return RandomGenerator.SecureRandom.RandomNumber(lowerLimit, upperLimit) end;
+
+	-- Set seed
+	if type(randomizer) == "function" then
+		randomizer = randomizer();
+	end
+	if type(randomizer) == "table" then
+		if type(randomizer["Randomize"]) == "function" then
+			randomizeSeed = randomizer["Randomize"];
+			func = function() return randomizer:Random(lowerLimit, upperLimit) end;
+		end
+	elseif type(func) ~= "function" then
+		error("Invalid randomizer (#3).");
+	end
+
+
+	randomizeSeed();
+	local p = func();
+	local runTime = 0;
+	while true do
+		p = func();
+		if (RandomGenerator.IsPrime(p)) then
+			return p;
+		end
+
+		runTime = runTime + 1;
+		if runTime%2000 == 0 then
+			sleep(0);
+		end
+	end
+	randomizeSeed();
+	return p;
+end
+
+RandomGenerator.RandomString = function(length, charLower, charUpper, randomizer)
+	length = length or 128;
+	if length>100000 then
+		length=100000;
+	end
+
+	charLower = charLower or 1;
+	charUpper = charUpper or 255;
+	if charLower<1 then
+		charLower = 1;
+	end
+	if charUpper>255 then
+		charUpper = 255;
+	end
+	if charLower>charUpper then
+		charLower = charLower + charUpper;
+		charUpper = charLower - charUpper;
+		charLower = charLower - charUpper;
+	end
+
+
+	local seed = seed or RandomGenerator.SecureRandom.RandomNumber();
+	-- randomizer = randomizer or RandomGenerator.Lua
+	local randomizeSeed = function() math.randomseed(RandomGenerator.SecureRandom.RandomNumber()) end;
+	local func = function() return RandomGenerator.SecureRandom.RandomNumber(charLower, charUpper) end;
+
+	-- Set seed
+	if type(randomizer) == "function" then
+		randomizer = randomizer();
+	end
+	if type(randomizer) == "table" then
+		if type(randomizer["Randomize"]) == "function" then
+			randomizeSeed = randomizer["Randomize"];
+			func = function() return randomizer:Random(charLower, charUpper) end;
+		end
+	elseif type(func) ~= "function" then
+		error("Invalid randomizer (#3).");
+	end
+
+	randomizeSeed();
+	local string=""
+	local runTime = 0;
+	for i=1, length do
+		local char = string.char(func())
+		string=string..char
+
+		runTime = runTime + 1;
+		if runTime%500 == 0 then
+			sleep(0);
+		end
+	end
+	randomizeSeed();
+
+	return string;
+end
+
+
+
+return RandomGenerator

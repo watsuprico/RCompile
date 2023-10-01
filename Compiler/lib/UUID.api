@@ -1,0 +1,91 @@
+local UUID = {}
+
+local Crypto = System.GetAPI("crypto")
+
+local clockSeq = math.random(0, 0x3FFF)
+
+-- Creates a version 1 UUID with the OS machine id as the "mac address". Use this to create a random id that can be tagged by this machine.
+function UUID.Version1()
+    -- Timestamp in 100-nanoseconds intervals since the Gregorian epoch
+    local timestamp = os.time() * 1e7 + 0x01B21DD213814000
+    local time_low = bit32.band(timestamp, 0xFFFFFFFF)
+
+    -- local time_mid = bit32.band(bit32.rshift(timestamp, 32), 0xFFFF)
+    -- local time_hi_and_version = bit32.band(bit32.rshift(timestamp, 48), 0x0FFF) + 0x1000
+    -- above conforms to the actual standard, but since this is inside MC I don't really care
+    -- + the os.time() isn't perfect + this means things change more frequently, = more random(ish)
+    local crc_date = Crypto.CRC32(os.date())
+    local time_mid = bit32.band(crc_date, 0xFFFF)
+    local time_hi_and_version = bit32.band(crc_date, 0x0FFF) + 0x1000
+
+    -- Modify clockSeq for every new UUID
+    clockSeq = clockSeq + 1
+    local clock_seq_low = bit32.band(clockSeq, 0xFF)
+    local clock_seq_hi_and_reserved = bit32.band(bit32.rshift(clockSeq, 8), 0x3F) + 0x80
+
+    -- Assume that Internal.MachineId is a string in the format "xxxxxxxxxxxx"
+    local node = string.format("%x", Crypto.CRC32(Internal.MachineId))..string.sub(Internal.MachineId, -4)
+
+    return string.format("%08x-%04x-1%02x-%02x%02x-%s", time_low, time_mid, string.sub(time_hi_and_version, 0, 3), clock_seq_hi_and_reserved, clock_seq_low, node)
+end
+
+-- Creates a "version 2" UUID. Very similar to a version 1 UUID, but the 2nd and 3rd segments are replaced with a CRC32 of the "domain", allowing further "tagging" of the UUID.
+-- If you do not provide a "domain", this becomes identical to a version 1 UUID.
+function UUID.Version2(domain)
+	if (type(domain) ~= "string") then
+		domain = os.date()
+	end
+
+	local timestamp = os.time() * 1e7 + 0x01B21DD213814000
+    local time_low = bit32.band(timestamp, 0xFFFFFFFF)
+
+    -- Generate a "local domain" and a "local identifier"
+    local domainHash = Crypto.CRC32(domain)
+    local local_domain = string.sub(domainHash, 0, 4)
+    local local_identifier = string.sub(domainHash, -4)
+
+    -- Modify clockSeq for every new UUID
+    clockSeq = clockSeq + 1
+    local clock_seq_low = bit32.band(clockSeq, 0xFF)
+    local clock_seq_hi_and_reserved = bit32.band(bit32.rshift(clockSeq, 8), 0x3F) + 0x80
+
+    -- Replace the Internal.MachineId with its Crypto.CRC32
+    local node = string.format("%x", Crypto.CRC32(Internal.MachineId))..string.sub(Internal.MachineId, -4)
+
+    return string.format("%08x-%04x-2%03x-%02x%02x-%s", time_low, local_domain, local_identifier, clock_seq_hi_and_reserved, clock_seq_low, node)
+end
+
+-- Creates a version 4 UUID. Use this to create a completely random id.
+function UUID.Version4()
+    local template = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'
+    local uuid = string.gsub(template, '[xy]', function (c)
+        local r = math.random(0, 0xf)
+        local v = (c == 'x') and r or (r % 4 + 8)
+        return string.format('%x', v)
+    end)
+    return uuid
+end
+
+-- Creates a version 4 UUID.
+function UUID.Create()
+	return UUID.Version4()
+end
+
+-- Creates a unique size id. This does not follow any standard and is more for extending the size of a uuid.
+-- Sizing is an number array, with each number being it's own segment. So, {2,3,2} would result in 2 bytes, 3 bytes and then 2 bytes: "77f3-156999-6b2".
+function UUID.UniqueSize(sizing)
+	System.CheckArgument(1, sizing, "table")
+	local uuid = ""
+	for _,set in ipairs(sizing) do
+		if #uuid > 0 then
+			uuid = uuid .. "-"
+		end
+		for i = 1,set do
+			uuid = uuid .. string.format("%02x", math.random(0, 255))
+		end
+	end
+
+	return uuid
+end
+
+return UUID

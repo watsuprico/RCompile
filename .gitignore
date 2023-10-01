@@ -1,0 +1,21 @@
+# Source
+/System/*
+
+# Output
+/dist/*
+
+## Compiler stuff ##
+# Key files
+*.key
+
+# Logs
+/Compiler/Logs/
+
+# Temp
+/Temp/
+
+
+
+# Project files
+*.sublime-*
+.vscode/

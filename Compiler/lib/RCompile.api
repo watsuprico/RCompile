@@ -1,0 +1,349 @@
+--[[
+
+	R(it) Compile(r)
+		v1
+
+	(c) Watsuprico 2023, see https://github.com/Watsuprico/RCompile
+
+]]
+
+local args = {...};
+local RCompile = args[1];
+
+if (RCompile == nil or type(RCompile) ~= "table") then
+	error("Missing RCompile object!");
+end
+
+
+-- Externals
+RCompile.Crypto = RCompile.GetAPI("Crypto");
+RCompile.Crypto.Random = RCompile.GetAPI("RandomGenerator");
+RCompile.Crypto.ECC = RCompile.GetAPI("ECC");
+RCompile.Crypto.RSA = RCompile.GetAPI("RSA");
+
+RCompile.UUID = RCompile.GetAPI("UUID");
+
+RCompile.Minify = RCompile.GetAPI("Minify");
+
+
+RCompile.KeyType = {
+	["ECC"] = 0,
+	["RSA"] = 1,	
+};
+
+
+-- Load extensions
+RCompile.Extensions = {};
+function RCompile.GetExtension(name)
+	local apiPath = RCompile.GetPathTo("/Extensions/" .. name);
+	RCompile.Log.Info("Loading extension: " .. name .. " (at: " .. apiPath .. ")");
+	local internalsChunk, err = loadfile(apiPath);
+	if not internalsChunk then
+		local errorMessage = "Failed to load extension: " .. name;
+		if err then
+			errorMessage = errorMessage .. ". Error: " .. err;
+		end
+
+		RCompile.Log.Alert(errorMessage);
+		printError(errorMessage);
+	end
+	return internalsChunk(RCompile);
+end
+
+local extensionFiles = fs.list(RCompile.GetPathTo("/Extensions/"));
+for _,name in ipairs(extensionFiles) do
+	local noExtensionName = "";
+	local lastdotpos = name:reverse():find("%.");
+    noExtensionName = name:sub(0, #name-lastdotpos);
+	RCompile.Extensions[noExtensionName] = RCompile.GetExtension(name);
+	local loadedMessage = "Loaded " .. noExtensionName;
+	
+	if (type(RCompile.Extensions[noExtensionName].Author) == "string") then
+		loadedMessage = loadedMessage .. ", by " .. RCompile.Extensions[noExtensionName].Author;
+	end
+	if (type(RCompile.Extensions[noExtensionName].Version) == "string") then
+		loadedMessage = loadedMessage .. " | version (" .. RCompile.Extensions[noExtensionName].Version .. ")";
+	end
+
+	loadedMessage = loadedMessage .. ".";
+	RCompile.Log.Info(loadedMessage);
+end
+
+
+-- Helpers
+RCompile.StringToCharsString = function(str)
+	local final = "";
+	local table = {tostring(s):byte(1,-1)};
+	for k,v in ipairs(table) do
+	    final = final .. tostring(v)..",";
+	end
+	return final:sub(0,#final-1);
+end
+RCompile.CharsStringToString = function(s)
+    local final = "";
+    for char in string.gmatch(s, "([^,]+)") do
+        final = final .. string.char(char);
+    end
+    return final;
+end
+RCompile.HexToTable = function(str)
+	if (#str % 2 ~= 0) then
+		error("Odd length string, not a valid hex string.");
+	end
+
+	local final = {};
+	local index = 1;
+	for i=1, #str/2 do
+		local segment = str:sub(index,index+1);
+		table.insert(final, tonumber(segment, 16));
+		index=index+2;
+	end
+	return final;
+end
+
+
+RCompile.ReadFileContents = function(file)
+	local file = fs.open(file, "r");
+	if (file == nil) then
+		return "";
+	end
+	local contents = file.readAll();
+	file.close();
+	return contents;
+end
+RCompile.WriteFileContents = function(file, contents)
+	local file = fs.open(file, "w");
+	file.write(contents);
+	file.close();
+end
+
+
+RCompile.LoadSettings = function(settingsPath)
+	settingsPath = type(settingsPath) == "string" and settingsPath or RCompile.GetPathTo("settings.tb");
+	local settings = textutils.unserialize(RCompile.ReadFileContents(settingsPath) or "{}") or {};
+	RCompile.Log.Info("Loading settings file " .. settingsPath);
+	RCompile.Settings = {
+		BuildVersion = settings.BuildVersion or {},
+
+		CompileList = type(settings.CompileList) == "table" and settings.CompileList or {},
+		CompileIgnoreList = (type(settings.CompileIgnoreList) == "table") and settings.CompileIgnoreList or {},
+
+		Minify = settings.Minify ~= false,
+		SignOnCompile = settings.SignOnCompile ~= false,
+		KeyType = (settings.KeyType == 0 or settings.KeyType == 1) and settings.KeyType or RCompile.KeyType.ECC,
+
+		OutputPath = (type(settings.OutputPath) == "string") and settings.OutputPath or "/dist/",
+	};
+
+	if (type(RCompile.Settings.BuildVersion) ~= "table") then
+		RCompile.Settings.BuildVersion = {
+			["Major"] = 0,
+			["Minor"] = 0,
+			["Build"] = 0,
+		};
+	end
+	if (type(RCompile.Settings.BuildVersion.Major) ~= "string" and type(RCompile.Settings.BuildVersion.Major) ~= "number") then
+		RCompile.Settings.BuildVersion.Major = 0;
+	end
+	if (type(RCompile.Settings.BuildVersion.Minor) ~= "string" and type(RCompile.Settings.BuildVersion.Minor) ~= "number") then
+		RCompile.Settings.BuildVersion.Minor = 0;
+	end
+	if (type(RCompile.Settings.BuildVersion.Build) ~= "string" and type(RCompile.Settings.BuildVersion.Build) ~= "number") then
+		RCompile.Settings.BuildVersion.Build = 0;
+	end
+end
+
+RCompile.SaveSettings = function(settingsPath)
+	settingsPath = type(settingsPath) == "string" and settingsPath or RCompile.GetPathTo("settings.tb");
+	local settingsString = textutils.serialize(RCompile.Settings) or "{}";
+	RCompile.Log.Info("Writing settings file " .. settingsPath);
+	RCompile.WriteFileContents(settingsPath, settingsString);
+end
+
+
+
+-- Generates, saves, and returns a new key set.
+RCompile.NewKey = function(keyType)
+	if (keyType == RCompile.KeyType.ECC) then
+		local privateKey, publicKey = RCompile.Crypto.ECC.GenerateKeypair();
+
+		local privateKeyText = textutils.serialize(privateKey);
+		local publicKeyText = textutils.serialize(publicKey);
+
+		RCompile.WriteFileContents(RCompile.GetPathTo("/KeyChain/ECC.public.key"), publicKeyText);
+		RCompile.WriteFileContents(RCompile.GetPathTo("/KeyChain/ECC.private.key"), privateKeyText);
+	end
+end
+
+RCompile.GetKey = function(keyType)
+	if (keyType == RCompile.KeyType.ECC) then
+		if (type(RCompile.Keys) == "table" and type(RCompile.Keys.ECC) == "table") then
+			if (type(RCompile.Keys.ECC.Private) == "table" and type(RCompile.Keys.ECC.Public) == "table") then
+				return RCompile.Keys.ECC.Private, RCompile.Keys.ECC.Public;
+			end
+		end
+
+		RCompile.Log.Info("Pulling ECC keys from disk.");
+		local private = "";
+		local public = "";
+
+		local publicKeyText = RCompile.ReadFileContents(RCompile.GetPathTo("/KeyChain/ECC.public.key"));
+		local privateKeyText = RCompile.ReadFileContents(RCompile.GetPathTo("/KeyChain/ECC.private.key"));
+
+		public = textutils.unserialize(publicKeyText);
+		private = textutils.unserialize(privateKeyText);
+
+		if (type(RCompile.Keys) ~= "table") then
+			RCompile.Keys = {};
+		end
+		RCompile.Keys.ECC = {
+			["Private"] = private,
+			["Public"] = public,
+		};
+
+		return private, public;
+	end
+end
+
+RCompile.TestKey = function(keyType)
+	if (keyType == RCompile.KeyType.ECC) then
+		local private, public = RCompile.GetKey(keyType);
+
+		local randomString = RCompile.Crypto.Random.RandomString(64);
+		local signature = RCompile.Crypto.ECC.Sign(private, randomString);
+		return RCompile.Crypto.ECC.Verify(public, randomString, signature) == true;
+	end
+end
+
+
+--[[
+	Compiles a string, running it through any extensions and finally minimizing it and returning the compiled string, hash, and signature.
+
+	The signature is converted to a hex string.
+]] 
+RCompile.CompileString = function(str)
+	RCompile.Log.Info("Compiling string of length \"" .. #str .. "\" ...");
+	for extensionName,extension in pairs(RCompile.Extensions) do
+		if (type(extension.CompileString) == "function") then
+			str = extension.CompileString(str);
+		end
+	end
+
+	-- Min?
+	if (RCompile.Settings.Minify) then
+		RCompile.Log.Info("Minifying...");
+		str = RCompile.Minify.Rebuild.MinifyString(str);
+	end
+
+
+	local compiledHash, signature = nil, nil;
+	if (RCompile.Settings.SignOnCompile) then
+		RCompile.Log.Info("Signing...");
+		local private, public = RCompile.GetKey(RCompile.Settings.KeyType);
+
+		-- hash -> sign hash
+		compiledHash = RCompile.Crypto.Sha256(str);
+		RCompile.Log.Info("\tcompiled hash: " .. compiledHash);
+		signature = RCompile.Crypto.ECC.Sign(private, compiledHash);
+		RCompile.Log.Info("Validating signature " .. signature:toHex());
+		if (RCompile.Crypto.ECC.Verify(public, compiledHash, signature)) then
+			RCompile.Log.Info("Signature is valid!");
+			signature = signature:toHex();
+		else
+			RCompile.Log.Error("Signature was unable to validate, meaning either the signature generated wrong or cannot be validated.");
+			error("Failed to generate signature, unable to validate.");
+		end
+	end
+
+
+	RCompile.Log.Info("Compiled!");
+
+	return str, compiledHash, signature;
+end
+
+--[[
+	Read the file, compile contents string, save hash + sig
+]]
+RCompile.CompileFile = function(name)
+	local fileContents = RCompile.ReadFileContents(name);
+	RCompile.Log.Info("Compiling " .. name);
+	local compiledContents, hash, signature = RCompile.CompileString(fileContents);
+
+	local outputPath = fs.combine(RCompile.Settings.OutputPath, name);
+	RCompile.Log.Info("\tsaving compiled file to " .. outputPath);
+	RCompile.WriteFileContents(outputPath, compiledContents);
+
+	RCompile.Log.Info("\tsaving hash and signature to " .. outputPath .. ".rsig");
+	RCompile.WriteFileContents(outputPath .. ".rsig", hash .. "$" .. signature);
+end
+
+
+
+
+
+
+local function getFilesInDir(dir, existingDir)
+	local files = {};
+	if (fs.isDir(dir)) then
+		local dirContents = fs.list(dir);
+
+		for _,name in ipairs(dirContents) do
+			local path = fs.combine(dir, name);
+			if (fs.isDir(path)) then
+				if (type(existingDir) == "table") then
+					getFilesInDir(path, existingDir);
+				else
+					files[name] = getFilesInDir(path);
+				end
+			else
+				if (type(existingDir) == "table") then
+					table.insert(existingDir, path);
+				else
+					table.insert(files, name);
+				end
+			end
+		end
+
+
+		if (type(existingDir) ~= "table") then
+			return files;
+		end
+	else
+		if (type(existingDir) ~= "table") then
+			return {};
+		end
+	end
+end
+
+RCompile.GetFilesToCompile = function()
+	local files = {};
+	for _,name in ipairs(RCompile.Settings.CompileList) do
+		if (fs.isDir(name)) then
+			getFilesInDir(name, files);
+		else
+			table.insert(files, name);
+		end
+	end
+
+	local ignoreFiles = {};
+	for _,name in ipairs(RCompile.Settings.CompileIgnoreList) do
+		if (fs.isDir(name)) then
+			getFilesInDir(name, ignoreFiles);
+		else
+			table.insert(ignoreFiles, name);
+		end
+	end
+
+	-- ignore
+	for _,name in ipairs(ignoreFiles) do
+		for i=#files,1,-1 do
+			if (name == files[i]) then
+				table.remove(files, i)
+			end
+		end
+	end
+	return files;
+end
+
+
+RCompile.LoadSettings();

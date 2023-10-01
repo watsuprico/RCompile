@@ -1,0 +1,28 @@
+{
+  KeyType = 0,
+  CompileList = {
+    "/System/",
+    "init.lua",
+    "startup.lua",
+  },
+  BuildVersion = {
+    Minor = 0,
+    Major = 1,
+    Build = 4,
+  },
+  OutputPath = "/dist/",
+  Minify = true,
+  SignOnCompile = true,
+  CompileIgnoreList = {
+    "/System/Boot/BN",
+    "/System/Logs/",
+    "/System/Vault/",
+    "/System/Localization/",
+    "/System/Configuration/",
+    "/System/RIT/Old/",
+    "/System/RIT/AES.api.ignore",
+    "/System/RIT/Scheduler.doc",
+    "/System/RIT/CodeX.doc",
+    "/System/RIT/Scheduler-source.api",
+  },
+}
